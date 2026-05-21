@@ -907,6 +907,36 @@ const aliases = {
   '劍潭':'台北市士林區', '劍潭站':'台北市士林區',
 };
 
+// 透過 Cloudflare Worker 串接中央氣象署
+const WORKER_URL = 'https://motorisland-weather.miya-987.workers.dev';
+
+// 門市對應CWA資料集與鄉鎮名
+const storeCWA = {
+  '北1':{dataset:'F-D0047-069',town:'中和區'},
+  '北2':{dataset:'F-D0047-069',town:'新莊區'},
+  '樹':{dataset:'F-D0047-069',town:'樹林區'},
+  '桃':{dataset:'F-D0047-005',town:'中壢區'},
+  '竹':{dataset:'F-D0047-055',town:'東區'},
+  '中':{dataset:'F-D0047-073',town:'北屯區'},
+  '太平':{dataset:'F-D0047-073',town:'太平區'},
+  '中2':{dataset:'F-D0047-073',town:'南區'},
+  '南':{dataset:'F-D0047-077',town:'東區'},
+  '高':{dataset:'F-D0047-065',town:'大寮區'},
+  '花':{dataset:'F-D0047-041',town:'花蓮市'},
+};
+
+// 縣市對應CWA資料集
+const cityCWA = {
+  '台北市':'F-D0047-061','新北市':'F-D0047-069','基隆市':'F-D0047-049',
+  '桃園市':'F-D0047-005','新竹市':'F-D0047-055','新竹縣':'F-D0047-009',
+  '苗栗縣':'F-D0047-013','台中市':'F-D0047-073','彰化縣':'F-D0047-017',
+  '南投縣':'F-D0047-021','雲林縣':'F-D0047-025','嘉義市':'F-D0047-057',
+  '嘉義縣':'F-D0047-029','台南市':'F-D0047-077','高雄市':'F-D0047-065',
+  '屏東縣':'F-D0047-033','宜蘭縣':'F-D0047-001','花蓮縣':'F-D0047-041',
+  '台東縣':'F-D0047-037','澎湖縣':'F-D0047-045','金門縣':'F-D0047-085',
+  '連江縣':'F-D0047-089',
+};
+
 // 門市精確座標
 const storeCoords = {
   '北1':{lat:24.9997,lng:121.4956},
@@ -1059,15 +1089,52 @@ async function fetchWeatherByCoords(lat, lng, cacheKey){
 }
 
 async function fetchWeather(code){
+  // 優先用CWA（中央氣象署），失敗則用Open-Meteo
+  const info=storeCWA[code];
+  if(info){
+    const w=await fetchWeatherCWA(info.dataset, info.town, code);
+    if(w) return w;
+  }
   const c=storeCoords[code]; if(!c) return null;
-  return fetchWeatherByCoords(c.lat, c.lng, code);
+  return fetchWeatherByCoords(c.lat, c.lng, code+'_om');
 }
 
 async function fetchDistrictWeather(city, district){
-  // 優先用「縣市+區名」避免重名，再用「區名」
+  // 優先用CWA
+  const dataset=cityCWA[city];
+  if(dataset){
+    const w=await fetchWeatherCWA(dataset, district, city+district);
+    if(w) return w;
+  }
+  // fallback到Open-Meteo座標
   const c=districtCoords[city+district]||districtCoords[city+'市'+district]||districtCoords[district];
   if(!c) return null;
-  return fetchWeatherByCoords(c.lat, c.lng, city+district);
+  return fetchWeatherByCoords(c.lat, c.lng, city+district+'_om');
+}
+
+async function fetchWeatherCWA(dataset, town, cacheKey){
+  if(weatherCache[cacheKey]) return weatherCache[cacheKey];
+  try{
+    const url=`${WORKER_URL}?dataset=${dataset}&location=${encodeURIComponent(town)}`;
+    const r=await fetch(url);
+    const j=await r.json();
+    const locs=j?.records?.locations?.[0]?.location;
+    if(!locs||!locs.length) return null;
+    const loc=locs[0];
+    const wx=loc.weatherElement.find(e=>e.elementName==='Wx');
+    const t=loc.weatherElement.find(e=>e.elementName==='T');
+    const desc=wx?.time?.[0]?.elementValue?.[0]?.value||'';
+    const temp=t?.time?.[0]?.elementValue?.[0]?.value||'--';
+    if(!desc||!temp) return null;
+    let icon='🌤️';
+    if(desc.includes('晴')&&!desc.includes('雲')) icon='☀️';
+    else if(desc.includes('多雲')) icon='⛅';
+    else if(desc.includes('陰')) icon='☁️';
+    else if(desc.includes('雨')||desc.includes('雷')) icon='🌧️';
+    else if(desc.includes('雪')) icon='❄️';
+    const res={temp:Math.round(Number(temp)),desc,icon};
+    weatherCache[cacheKey]=res; return res;
+  }catch(e){return null;}
 }
 
 const colors={
