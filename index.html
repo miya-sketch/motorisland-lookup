@@ -910,22 +910,22 @@ const aliases = {
 // 透過 Cloudflare Worker 串接中央氣象署
 const WORKER_URL = 'https://motorisland-weather.miya-987.workers.dev';
 
-// 門市對應CWA資料集與鄉鎮名
-const storeCWA = {
-  '北1':{dataset:'F-D0047-069',town:'中和區'},
-  '北2':{dataset:'F-D0047-069',town:'新莊區'},
-  '樹':{dataset:'F-D0047-069',town:'樹林區'},
-  '桃':{dataset:'F-D0047-005',town:'中壢區'},
-  '竹':{dataset:'F-D0047-055',town:'東區'},
-  '中':{dataset:'F-D0047-073',town:'北屯區'},
-  '太平':{dataset:'F-D0047-073',town:'太平區'},
-  '中2':{dataset:'F-D0047-073',town:'南區'},
-  '南':{dataset:'F-D0047-077',town:'東區'},
-  '高':{dataset:'F-D0047-065',town:'大寮區'},
-  '花':{dataset:'F-D0047-041',town:'花蓮市'},
+// 門市對應氣象站代碼（即時觀測）
+const storeStation = {
+  '北1':'466940',  // 新北板橋
+  '北2':'466900',  // 新北淡水
+  '樹':'C0D480',   // 新北樹林
+  '桃':'C0D530',   // 桃園中壢
+  '竹':'466910',   // 新竹
+  '中':'467490',   // 台中
+  '太平':'C0F9A0', // 台中太平
+  '中2':'467490',  // 台中（共用）
+  '南':'467410',   // 台南
+  '高':'467440',   // 高雄
+  '花':'466990',   // 花蓮
 };
 
-// 縣市對應CWA資料集
+// 縣市對應CWA資料集（備援預報）
 const cityCWA = {
   '台北市':'F-D0047-061','新北市':'F-D0047-069','基隆市':'F-D0047-049',
   '桃園市':'F-D0047-005','新竹市':'F-D0047-055','新竹縣':'F-D0047-009',
@@ -1089,12 +1089,13 @@ async function fetchWeatherByCoords(lat, lng, cacheKey){
 }
 
 async function fetchWeather(code){
-  // 優先用CWA（中央氣象署），失敗則用Open-Meteo
-  const info=storeCWA[code];
-  if(info){
-    const w=await fetchWeatherCWA(info.dataset, info.town, code);
+  // 即時觀測
+  const stationId=storeStation[code];
+  if(stationId){
+    const w=await fetchWeatherStation(stationId, code);
     if(w) return w;
   }
+  // 備援：Open-Meteo座標
   const c=storeCoords[code]; if(!c) return null;
   return fetchWeatherByCoords(c.lat, c.lng, code+'_om');
 }
@@ -1110,6 +1111,34 @@ async function fetchDistrictWeather(city, district){
   const c=districtCoords[city+district]||districtCoords[city+'市'+district]||districtCoords[district];
   if(!c) return null;
   return fetchWeatherByCoords(c.lat, c.lng, city+district+'_om');
+}
+
+async function fetchWeatherStation(stationId, cacheKey){
+  if(weatherCache[cacheKey]) return weatherCache[cacheKey];
+  try{
+    const url=`${WORKER_URL}?station=${stationId}`;
+    const r=await fetch(url);
+    const j=await r.json();
+    const obs=j?.records?.Station?.[0]?.WeatherElement;
+    if(!obs) return null;
+    const temp=obs.AirTemperature;
+    const rain=obs.Now?.Precipitation;
+    const weather=obs.Weather;
+    if(temp===undefined||temp===-99) return null;
+    let desc,icon;
+    if(weather&&weather!=='晴' ) {
+      desc=weather; 
+    } else if(rain>0){desc='下雨';} 
+    else {desc='晴天';}
+    if(desc.includes('晴')&&!desc.includes('雲')) icon='☀️';
+    else if(desc.includes('多雲')) icon='⛅';
+    else if(desc.includes('陰')) icon='☁️';
+    else if(desc.includes('雨')||desc.includes('雷')) icon='🌧️';
+    else if(desc.includes('雪')) icon='❄️';
+    else icon='🌤️';
+    const res={temp:Math.round(temp),desc,icon};
+    weatherCache[cacheKey]=res; return res;
+  }catch(e){return null;}
 }
 
 async function fetchWeatherCWA(dataset, town, cacheKey){
